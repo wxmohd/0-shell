@@ -1,7 +1,5 @@
 use std::collections::HashMap;
 
-/// Minimal placeholder for function definitions:
-/// myfunc() { echo "hi"; }
 #[derive(Default)]
 pub struct FunctionTable {
     pub map: HashMap<String, String>, // name -> body (raw)

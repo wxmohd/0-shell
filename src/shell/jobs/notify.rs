@@ -1,7 +1,2 @@
-/// In a full implementation, this module would:
-/// - install a SIGCHLD handler
-/// - reap children (waitpid(WNOHANG))
-/// - update Job state and print notifications like:
-///   [1]+  Stopped                 python
-///
-/// Stubbed for now.
+// SIGCHLD-based async reaping would live here.
+// For now we rely on exec::maybe_reap() on Unix and do nothing on non-Unix.

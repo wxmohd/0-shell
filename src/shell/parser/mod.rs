@@ -2,4 +2,4 @@ pub mod lexer;
 pub mod ast;
 pub mod grammar;
 
-pub use grammar::parse_command;
+pub use grammar::{parse_line, ParsedCommand};

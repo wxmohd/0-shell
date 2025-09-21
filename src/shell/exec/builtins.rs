@@ -3,13 +3,23 @@ use crate::prelude::*;
 use std::env;
 use std::fs;
 use std::io::{Read, Write};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
-/// Dispatches builtins. Returns an exit status (0 ok, non-zero error).
-pub fn dispatch_builtin(_shell: &mut crate::shell::Shell, cmd: String, args: &[String]) -> Result<i32> {
+pub fn is_builtin(name: &str) -> bool {
+    matches!(name,
+        "exit" | "echo" | "pwd" | "cd" | "mkdir" | "ls" | "cat" | "cp" | "rm" | "mv" |
+        "jobs" | "fg" | "bg" | "kill" | "sleep" | "read"
+    )
+}
+
+/// Dispatches builtins. Returns an exit status.
+pub fn dispatch_builtin(shell: &mut crate::shell::Shell, cmd: String, args: &[String]) -> Result<i32> {
     match cmd.as_str() {
-        "exit" => Ok(ok()),
-        "echo" => cmd_echo(args),
+        "exit" => {
+            // Return special signal so REPL exits immediately
+            Ok(EXIT_SIGNAL)
+        }
+        "echo" => cmd_echo(shell, args),
         "pwd"  => cmd_pwd(),
         "cd"   => cmd_cd(args),
         "mkdir"=> cmd_mkdir(args),
@@ -18,6 +28,16 @@ pub fn dispatch_builtin(_shell: &mut crate::shell::Shell, cmd: String, args: &[S
         "cp"   => cmd_cp(args),
         "rm"   => cmd_rm(args),
         "mv"   => cmd_mv(args),
+
+        // job control
+        "jobs" => crate::shell::jobs::control::builtin_jobs(&mut shell.jobs, args),
+        "fg"   => crate::shell::jobs::control::builtin_fg(shell, args),
+        "bg"   => crate::shell::jobs::control::builtin_bg(&mut shell.jobs, args),
+        "kill" => crate::shell::jobs::control::builtin_kill(&mut shell.jobs, args),
+
+        // utilities for scripting demos
+        "sleep" => cmd_sleep(args),
+        "read"  => cmd_read(shell, args),
         _ => {
             eprintln!("Command '{cmd}' not found");
             Ok(127)
@@ -25,8 +45,8 @@ pub fn dispatch_builtin(_shell: &mut crate::shell::Shell, cmd: String, args: &[S
     }
 }
 
-fn cmd_echo(args: &[String]) -> Result<i32> {
-    let expanded = expand_vars(args);
+fn cmd_echo(shell: &crate::shell::Shell, args: &[String]) -> Result<i32> {
+    let expanded = expand_vars(args, &shell.vars);
     println!("{}", expanded.join(" "));
     Ok(ok())
 }
@@ -119,13 +139,12 @@ fn cmd_ls(args: &[String]) -> Result<i32> {
                 let p = e.path();
                 let md = e.metadata()?;
                 if long {
-                    let mode = mode_string(&md);
+                    let mode = super::fileops::mode_string(&md);
                     let size = md.len();
-                    // Simplified owner/group/time formatting for now
                     print!("{mode} {:>8} ", size);
                 }
                 if classify {
-                    print!("{}{}", name, classify_suffix(&p, md.is_dir()));
+                    print!("{}{}", name, super::fileops::classify_suffix(&p, md.is_dir()));
                 } else {
                     print!("{name}");
                 }
@@ -133,12 +152,12 @@ fn cmd_ls(args: &[String]) -> Result<i32> {
             }
         } else {
             if long {
-                let mode = mode_string(&meta);
+                let mode = super::fileops::mode_string(&meta);
                 let size = meta.len();
                 print!("{mode} {:>8} ", size);
             }
             if classify {
-                print!("{}{}", t, classify_suffix(path, meta.is_dir()));
+                print!("{}{}", t, super::fileops::classify_suffix(path, meta.is_dir()));
             } else {
                 print!("{t}");
             }
@@ -151,7 +170,6 @@ fn cmd_ls(args: &[String]) -> Result<i32> {
 
 fn cmd_cat(args: &[String]) -> Result<i32> {
     if args.is_empty() {
-        // read from stdin to stdout
         let mut buf = String::new();
         io::stdin().read_to_string(&mut buf)?;
         print!("{buf}");
@@ -185,7 +203,6 @@ fn cmd_cp(args: &[String]) -> Result<i32> {
     };
 
     if meta.is_dir() {
-        // Minimal: copy directory contents (non-recursive for now)
         eprintln!("cp: copying directories recursively not implemented");
         return Ok(err());
     } else {
@@ -236,10 +253,28 @@ fn cmd_mv(args: &[String]) -> Result<i32> {
     match fs::rename(src, dst) {
         Ok(_) => Ok(ok()),
         Err(_) => {
-            // Fallback: copy then remove
             fs::copy(src, dst).map_err(|e| format!("mv copy: {} -> {}: {}", src, dst, e))?;
             fs::remove_file(src).or_else(|_| fs::remove_dir_all(src)).ok();
             Ok(ok())
         }
     }
+}
+
+fn cmd_sleep(args: &[String]) -> Result<i32> {
+    let secs: u64 = args.get(0).and_then(|s| s.parse().ok()).unwrap_or(1);
+    std::thread::sleep(std::time::Duration::from_secs(secs));
+    Ok(ok())
+}
+
+fn cmd_read(shell: &mut crate::shell::Shell, args: &[String]) -> Result<i32> {
+    // usage: read NAME
+    let Some(var) = args.get(0) else {
+        eprintln!("read: missing variable name");
+        return Ok(err());
+    };
+    let mut line = String::new();
+    io::stdin().read_line(&mut line)?;
+    let line = line.strip_suffix('\n').unwrap_or(&line).to_string();
+    shell.vars.insert(var.clone(), line);
+    Ok(ok())
 }

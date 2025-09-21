@@ -3,7 +3,7 @@ use super::{Job, JobState};
 pub fn format_jobs_simple(jobs: &[Job]) -> String {
     let mut out = String::new();
     for j in jobs {
-        let mark = if j.is_current { '+' } else { ' ' };
+        let mark = if j.current { '+' } else { ' ' };
         let status = match j.state {
             JobState::Running => "Running",
             JobState::Stopped => "Stopped",

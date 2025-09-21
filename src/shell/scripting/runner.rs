@@ -1,8 +1,8 @@
 use crate::prelude::*;
 use std::fs;
 use std::path::Path;
-use crate::shell::parser::parse_command;
-use crate::shell::exec::dispatch_builtin;
+use crate::shell::parser::parse_line;
+use crate::shell::exec::run_parsed_command;
 
 /// Execute a script file line-by-line using the same parser + builtins.
 pub fn run_script_file(shell: &mut crate::shell::Shell, path: &Path) -> Result<i32> {
@@ -10,24 +10,18 @@ pub fn run_script_file(shell: &mut crate::shell::Shell, path: &Path) -> Result<i
     run_script_string(shell, &text)
 }
 
-/// Execute a multi-line string as a script.
+/// Execute a multi-line string as a script (very small language).
 pub fn run_script_string(shell: &mut crate::shell::Shell, script: &str) -> Result<i32> {
-    for raw_line in script.lines() {
-        let line = raw_line.trim();
+    for raw in script.lines() {
+        let line = raw.trim();
         if line.is_empty() || line.starts_with('#') {
             continue;
         }
-        // TODO: handle multi-line constructs (for, if, functions)
-        if let Some((cmd, args)) = parse_command(line) {
-            match dispatch_builtin(shell, cmd.clone(), &args) {
-                Ok(status) => shell.last_status = status,
-                Err(e) => {
-                    eprintln!("script error: {e}");
-                    shell.last_status = 1;
-                }
-            }
-            if cmd == "exit" {
-                break;
+        for cmd in parse_line(line) {
+            let status = run_parsed_command(shell, cmd)?;
+            shell.last_status = status;
+            if status == crate::shell::exec::status::EXIT_SIGNAL {
+                return Ok(0);
             }
         }
     }
