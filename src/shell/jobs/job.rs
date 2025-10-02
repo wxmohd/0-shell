@@ -52,14 +52,13 @@ impl JobTable {
             state,
             cmdline,
             pids: vec![pgid.as_raw()],
-            current: true,
+            current: true, // newest is current (+)
         });
         id
     }
 
     #[cfg(not(unix))]
     pub fn add_job(&mut self, _pgid: i32, state: JobState, cmd: String, args: Vec<String>) -> usize {
-        // Windows stub: store pgid = 0 (job control isn’t active here)
         self.next_id += 1;
         let id = self.next_id;
         for j in self.jobs.iter_mut() { j.current = false; }
@@ -99,6 +98,49 @@ impl JobTable {
         if let Some(num) = s.strip_prefix('%') {
             if let Ok(id) = num.parse::<usize>() {
                 return self.by_id(id);
+            }
+        }
+        None
+    }
+
+    /// Return (current_job_id, previous_job_id) for `+` and `-` markers.
+    pub fn current_prev_ids(&self) -> (Option<usize>, Option<usize>) {
+        if self.jobs.is_empty() {
+            return (None, None);
+        }
+        if let Some((i, _)) = self.jobs.iter().enumerate().rev().find(|(_, j)| j.current) {
+            let cur = Some(self.jobs[i].id);
+            let prev = if i >= 1 { Some(self.jobs[i - 1].id) } else { None };
+            return (cur, prev);
+        }
+        let last = self.jobs.back().map(|j| j.id);
+        let prev = if self.jobs.len() >= 2 {
+            self.jobs.get(self.jobs.len() - 2).map(|j| j.id)
+        } else {
+            None
+        };
+        (last, prev)
+    }
+
+    // ---- New index-based helpers (immutable) ----
+
+    pub fn index_by_id(&self, id: usize) -> Option<usize> {
+        self.jobs.iter().position(|j| j.id == id)
+    }
+
+    pub fn index_by_percent(&self, s: &str) -> Option<usize> {
+        if s == "%+" {
+            return self.jobs.iter().rposition(|j| j.current);
+        }
+        if s == "%-" {
+            if self.jobs.len() > 1 {
+                return Some(self.jobs.len() - 2);
+            }
+            return None;
+        }
+        if let Some(num) = s.strip_prefix('%') {
+            if let Ok(id) = num.parse::<usize>() {
+                return self.index_by_id(id);
             }
         }
         None

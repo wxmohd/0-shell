@@ -19,41 +19,50 @@ use std::{ffi::CString, os::unix::ffi::OsStrExt, path::PathBuf};
 /// Run one parsed command (maybe background). Returns exit status.
 /// If the builtin was `exit`, return EXIT_SIGNAL so caller can break the REPL.
 pub fn run_parsed_command(shell: &mut crate::shell::Shell, p: ParsedCommand) -> Result<i32> {
-    // Builtins first (jobs/bg/fg/kill/sleep/etc.)
     if builtins::is_builtin(&p.cmd) {
         return builtins::dispatch_builtin(shell, p.cmd, &p.args);
     }
 
-    // Otherwise try external (Unix). On non-Unix, print not found.
-    #[cfg(unix)]
+    // External programs:
+    // - Enabled only on Unix AND when the "external" feature is set.
+    // - Otherwise, refuse to run (to satisfy the "no external binaries" audit).
+    #[cfg(all(unix, feature = "external"))]
     {
         return run_external(shell, &p.cmd, &p.args, p.background);
     }
 
-    #[cfg(not(unix))]
+    #[cfg(not(all(unix, feature = "external")))]
     {
         eprintln!("Command '{}' not found", p.cmd);
         Ok(127)
     }
 }
 
-/// Opportunistic reaper to keep job table fresh (Unix)
-pub fn maybe_reap(shell: &mut crate::shell::Shell) {
+
+/// Opportunistic reaper to keep job table fresh (Unix).
+/// Returns true if any child state changed (so the caller can redraw the prompt on a fresh line).
+pub fn maybe_reap(shell: &mut crate::shell::Shell) -> bool {
+    let mut changed = false;
     #[cfg(unix)]
     {
         use crate::shell::jobs::UpdateKind;
         loop {
-            match waitpid(Pid::from_raw(-1), Some(WaitPidFlag::WNOHANG | WaitPidFlag::WUNTRACED | WaitPidFlag::WCONTINUED)) {
+            match waitpid(
+                Pid::from_raw(-1),
+                Some(WaitPidFlag::WNOHANG | WaitPidFlag::WUNTRACED | WaitPidFlag::WCONTINUED),
+            ) {
                 Ok(WaitStatus::StillAlive) => break,
                 Ok(status) => {
                     if let Some(upd) = UpdateKind::from_waitstatus(status) {
                         shell.jobs.apply_update(upd);
+                        changed = true;
                     }
                 }
                 Err(_) => break,
             }
         }
     }
+    changed
 }
 
 /// Search PATH for program (Unix)
@@ -84,7 +93,7 @@ fn which(cmd: &str) -> Option<PathBuf> {
 /// Exec external with job-control semantics (Unix)
 #[cfg(unix)]
 fn run_external(shell: &mut crate::shell::Shell, cmd: &str, args: &[String], background: bool) -> Result<i32> {
-    use crate::shell::jobs::{JobState, UpdateKind};
+    use crate::shell::jobs::JobState;
     use crate::shell::signals::tty;
 
     let program = match which(cmd) {
@@ -101,20 +110,17 @@ fn run_external(shell: &mut crate::shell::Shell, cmd: &str, args: &[String], bac
     for a in args {
         argv.push(CString::new(a.as_str()).unwrap());
     }
-    let envp: Vec<CString> = std::env::vars().map(|(k, v)| CString::new(format!("{k}={v}")).unwrap()).collect();
+    let envp: Vec<CString> = std::env::vars()
+        .map(|(k, v)| CString::new(format!("{k}={v}")).unwrap())
+        .collect();
 
-    // Fork
     match unsafe { fork() }? {
         ForkResult::Child => {
-            // Child: new process group
             let pid = getpid();
             let _ = setpgid(pid, pid);
-
             if !background {
                 let _ = tty::give_terminal_to(pid);
             }
-
-            // exec
             match execve(&CString::new(program.as_os_str().as_bytes().to_vec()).unwrap(), &argv, &envp) {
                 Ok(_) => unreachable!(),
                 Err(e) => {
@@ -124,17 +130,13 @@ fn run_external(shell: &mut crate::shell::Shell, cmd: &str, args: &[String], bac
             }
         }
         ForkResult::Parent { child } => {
-            // Parent: set child's pgid
             let _ = setpgid(child, child);
-
-            // Register job
             let id = shell.jobs.add_job(child, JobState::Running, cmd.to_string(), args.to_vec());
 
             if background {
                 println!("[{}] {}", id, child.as_raw());
                 Ok(0)
             } else {
-                // Give terminal, wait, then take back
                 let _ = tty::give_terminal_to(child);
                 let status = wait_foreground(shell, child);
                 let _ = tty::give_terminal_back_to_shell();
@@ -147,6 +149,8 @@ fn run_external(shell: &mut crate::shell::Shell, cmd: &str, args: &[String], bac
 #[cfg(unix)]
 fn wait_foreground(shell: &mut crate::shell::Shell, pgid: Pid) -> Result<i32> {
     use crate::shell::jobs::UpdateKind;
+    use nix::sys::wait::WaitStatus;
+
     loop {
         match waitpid(Pid::from_raw(-pgid.as_raw()), Some(WaitPidFlag::WUNTRACED | WaitPidFlag::WCONTINUED)) {
             Ok(WaitStatus::Exited(_, code)) => {

@@ -1,3 +1,5 @@
-pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
+pub use std::io;
+pub use std::io::Write;
 
-pub use std::io::{self, Write};
+pub type AnyError = Box<dyn std::error::Error + Send + Sync + 'static>;
+pub type Result<T> = std::result::Result<T, AnyError>;

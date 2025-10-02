@@ -9,5 +9,7 @@ once_cell = "1"
 
 [features]
 default = []
-
+external = []        # enable external exec (execve) when needed
 [dev-dependencies]
+
+

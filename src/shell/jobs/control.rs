@@ -1,10 +1,18 @@
 use crate::prelude::*;
 use super::{JobTable, JobState};
-#[cfg(unix)]
-use nix::{sys::signal::{killpg, Signal}, unistd::Pid};
 
+#[cfg(unix)]
+use nix::{
+    sys::{
+        signal::{kill, killpg, Signal},
+        wait::{waitpid, WaitPidFlag, WaitStatus},
+    },
+    unistd::Pid,
+};
+
+/// Print jobs, with support for:
+/// -l (include pid), -p (only pid), -r (running only), -s (stopped only)
 pub fn builtin_jobs(table: &mut JobTable, args: &[String]) -> Result<i32> {
-    // Flags: -l (with pid), -p (only pid), -r (running), -s (stopped)
     let mut show_pids_only = false;
     let mut with_pid = false;
     let mut filter: Option<JobState> = None;
@@ -18,30 +26,40 @@ pub fn builtin_jobs(table: &mut JobTable, args: &[String]) -> Result<i32> {
         }
     }
 
+    let (cur_id, prev_id) = table.current_prev_ids();
+
     for j in table.jobs.iter() {
         if let Some(f) = filter {
             if j.state != f { continue; }
         }
         if show_pids_only {
             #[cfg(unix)]
-            println!("{}", j.pgid.as_raw());
+            { println!("{}", j.pgid.as_raw()); }
             #[cfg(not(unix))]
-            println!("0");
+            { println!("0"); }
             continue;
         }
-        let mark = if j.current { '+' } else { ' ' };
+
+        let mark = if Some(j.id) == cur_id { '+' }
+                   else if Some(j.id) == prev_id { '-' }
+                   else { ' ' };
+
         let status = match j.state {
             JobState::Running => "Running",
             JobState::Stopped => "Stopped",
             JobState::Terminated => "Terminated",
         };
+
+        // Append " &" only for Running background jobs to mirror the audit examples.
+        let trailer = if j.state == JobState::Running { " &" } else { "" };
+
         if with_pid {
             #[cfg(unix)]
-            println!("[{}]{} {:<6} {}", j.id, mark, j.pgid.as_raw(), status.to_string() + "                 " + &j.summary());
+            println!("[{}]{}  {:<6} {:<20} {}{}", j.id, mark, j.pgid.as_raw(), status, j.summary(), trailer);
             #[cfg(not(unix))]
-            println!("[{}]{} {:<6} {}", j.id, mark, 0, status.to_string() + "                 " + &j.summary());
+            println!("[{}]{}  {:<6} {:<20} {}{}", j.id, mark, 0, status, j.summary(), trailer);
         } else {
-            println!("[{}]{}  {:<10}  {} &", j.id, mark, status, j.summary());
+            println!("[{}]{}  {:<10}  {}{}", j.id, mark, status, j.summary(), trailer);
         }
     }
     Ok(0)
@@ -50,15 +68,18 @@ pub fn builtin_jobs(table: &mut JobTable, args: &[String]) -> Result<i32> {
 pub fn builtin_bg(table: &mut JobTable, args: &[String]) -> Result<i32> {
     #[cfg(unix)]
     {
-        let j = resolve_job_mut(table, args)?;
-        if j.state == JobState::Stopped {
-            killpg(j.pgid, Signal::SIGCONT).ok();
-            j.state = JobState::Running;
-            println!("[{}]+ {} &", j.id, j.summary());
+        let idx = resolve_job_index(table, args)?;
+        if table.jobs[idx].state == JobState::Stopped {
+            let pgid = table.jobs[idx].pgid;
+            killpg(pgid, Signal::SIGCONT).ok();
+            table.jobs[idx].state = JobState::Running;
+            let summary = table.jobs[idx].summary();
+            let id = table.jobs[idx].id;
+            println!("[{}]+ {} &", id, summary);
             return Ok(0);
         }
         eprintln!("bg: job is not stopped");
-        return Ok(1);
+        Ok(1)
     }
     #[cfg(not(unix))]
     {
@@ -71,25 +92,34 @@ pub fn builtin_fg(shell: &mut crate::shell::Shell, args: &[String]) -> Result<i3
     #[cfg(unix)]
     {
         use crate::shell::signals::tty;
-        use nix::sys::wait::{waitpid, WaitPidFlag, WaitStatus};
 
-        let j = resolve_job_mut(&mut shell.jobs, args)?;
-        // Give terminal to job and continue
-        tty::give_terminal_to(j.pgid).ok();
-        nix::sys::signal::killpg(j.pgid, nix::sys::signal::Signal::SIGCONT).ok();
-        j.state = JobState::Running;
+        let idx = resolve_job_index(&shell.jobs, args)?;
+        let pgid = shell.jobs.jobs[idx].pgid;
+        let id = shell.jobs.jobs[idx].id;
+
+        // Give terminal to job and continue it
+        tty::give_terminal_to(pgid).ok();
+        killpg(pgid, Signal::SIGCONT).ok();
+        shell.jobs.jobs[idx].state = JobState::Running;
 
         // Wait until it exits or stops again
+        let mut exited = false;
         loop {
-            match waitpid(nix::unistd::Pid::from_raw(-j.pgid.as_raw()), Some(WaitPidFlag::WUNTRACED)) {
+            match waitpid(Pid::from_raw(-pgid.as_raw()), Some(WaitPidFlag::WUNTRACED)) {
                 Ok(WaitStatus::Exited(_, _)) | Ok(WaitStatus::Signaled(_, _, _)) => {
-                    // Mark as terminated; JobTable reaper will print when update occurs
-                    shell.jobs.jobs.retain(|x| x.id != j.id);
+                    exited = true;
                     break;
                 }
                 Ok(WaitStatus::Stopped(_, _)) => {
-                    j.state = JobState::Stopped;
-                    println!("[{}]+  Stopped                 {}", j.id, j.summary());
+                    // mark stopped and print
+                    if let Some(j) = shell.jobs.jobs.iter().find(|j| j.id == id) {
+                        println!("[{}]+  Stopped                 {}", j.id, j.summary());
+                    } else {
+                        println!("[{}]+  Stopped", id);
+                    }
+                    if let Some(j) = shell.jobs.jobs.iter_mut().find(|j| j.id == id) {
+                        j.state = JobState::Stopped;
+                    }
                     break;
                 }
                 Ok(_) => {}
@@ -97,9 +127,14 @@ pub fn builtin_fg(shell: &mut crate::shell::Shell, args: &[String]) -> Result<i3
             }
         }
 
-        // Take terminal back
+        // Take terminal back to the shell
         tty::give_terminal_back_to_shell().ok();
-        return Ok(0);
+
+        // If it exited, remove from table after we dropped &mut borrows
+        if exited {
+            shell.jobs.jobs.retain(|x| x.id != id);
+        }
+        Ok(0)
     }
     #[cfg(not(unix))]
     {
@@ -116,12 +151,16 @@ pub fn builtin_kill(table: &mut JobTable, args: &[String]) -> Result<i32> {
             return Ok(1);
         }
         let target = &args[0];
-        if let Some(j) = table.by_percent(target) {
-            nix::sys::signal::killpg(j.pgid, nix::sys::signal::Signal::SIGTERM).ok();
+
+        // %n notation
+        if let Some(i) = table.index_by_percent(target) {
+            let pgid = table.jobs[i].pgid;
+            killpg(pgid, Signal::SIGTERM).ok();
             return Ok(0);
         }
+        // raw PID
         if let Ok(pid) = target.parse::<i32>() {
-            nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid), nix::sys::signal::Signal::SIGTERM).ok();
+            kill(Pid::from_raw(pid), Signal::SIGTERM).ok();
             return Ok(0);
         }
         eprintln!("kill: invalid target '{}'", target);
@@ -135,23 +174,21 @@ pub fn builtin_kill(table: &mut JobTable, args: &[String]) -> Result<i32> {
 }
 
 #[cfg(unix)]
-fn resolve_job_mut<'a>(table: &'a mut JobTable, args: &[String]) -> Result<&'a mut super::job::Job> {
+fn resolve_job_index(table: &JobTable, args: &[String]) -> Result<usize> {
     if let Some(tok) = args.get(0) {
         if tok.starts_with('%') || tok == "%+" || tok == "%-" {
-            if let Some(j) = table.by_percent(tok) {
-                return Ok(j);
+            if let Some(i) = table.index_by_percent(tok) {
+                return Ok(i);
             }
         } else if let Ok(id) = tok.parse::<usize>() {
-            if let Some(j) = table.by_id(id) {
-                return Ok(j);
+            if let Some(i) = table.index_by_id(id) {
+                return Ok(i);
             }
         }
     }
-    // default: current '+'
-    for j in table.jobs.iter_mut().rev() {
-        if j.current {
-            return Ok(j);
-        }
+    // default to current '+'
+    if let Some(i) = table.jobs.iter().rposition(|j| j.current) {
+        return Ok(i);
     }
     Err("fg/bg: no current job".into())
 }

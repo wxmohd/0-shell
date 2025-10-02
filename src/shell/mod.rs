@@ -1,7 +1,7 @@
 pub mod repl;
 pub mod prompt;
 pub mod input;
-pub mod parser;    // <- lexer/ast/grammar are inside this module
+pub mod parser;    // contains lexer/ast/grammar
 pub mod exec;
 pub mod jobs;
 pub mod signals;
@@ -18,6 +18,7 @@ pub struct Shell {
     pub last_status: i32,
     pub vars: HashMap<String, String>,
     pub jobs: JobTable,
+    pub history: Vec<String>, // if you added Up/Down support
 
     #[cfg(unix)]
     pub shell_pgid: Pid,
@@ -37,6 +38,7 @@ impl Shell {
             last_status: 0,
             vars: HashMap::new(),
             jobs: JobTable::default(),
+            history: Vec::new(),
             #[cfg(unix)]
             shell_pgid,
         })

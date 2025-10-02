@@ -1,39 +1,29 @@
-use super::{exec, input::read_line, parser, prompt::render_prompt};
+use super::{exec, input::read_line_with_history, parser, prompt::render_prompt};
 use crate::prelude::*;
 
 pub struct Repl;
 
-impl Repl {
-    pub fn new() -> Self {
-        Self
-    }
+impl Repl { pub fn new() -> Self { Self } }
 
+impl Repl {
     pub fn run(&mut self, shell: &mut crate::shell::Shell) -> Result<()> {
         loop {
-            // Opportunistic reap (Unix): update job statuses between prompts
-            exec::maybe_reap(shell);
+            // If background jobs printed, start prompt on a fresh line.
+            if exec::maybe_reap(shell) { println!(); }
 
-            print!("{}", render_prompt());
-            io::stdout().flush()?;
-
-            let Some(line) = read_line()? else {
-                println!(); // Ctrl+D newline
+            let prompt = render_prompt(); 
+            let Some(line) = read_line_with_history(&prompt, &mut shell.history)? else {
+                println!();
                 break;
             };
-            let line = line.trim();
-            if line.is_empty() {
-                continue;
-            }
 
-            // Parse possibly multiple commands separated by ';'
-            let cmds = parser::parse_line(line);
-            for cmd in cmds {
-                // `exit` handled as builtin; keep running until it returns
+            let line = line.trim();
+            if line.is_empty() { continue; }
+
+            for cmd in parser::parse_line(line) {
                 let status = exec::run_parsed_command(shell, cmd)?;
                 shell.last_status = status;
-                if status == exec::status::EXIT_SIGNAL {
-                    return Ok(());
-                }
+                if status == exec::status::EXIT_SIGNAL { return Ok(()); }
             }
         }
         Ok(())
